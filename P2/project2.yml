@@ -1,0 +1,314 @@
+Parameters:
+  # Paramenters are entirely optional.
+  # but using them will make your cloudformation templates more reusable
+  # use them for things that may change over time, such as instance type,
+  # VPCs and so on.
+  VpcCIDR:
+    Description: The CIDR block for the vpc
+    Type: String
+    Default: 10.0.0.0/16
+
+  PublicSubnet1CIDR:
+    Description: The CIDR block for the first public subnet
+    Type: String
+    Default: 10.0.3.0/24
+  
+  PublicSubnet2CIDR:
+    Description: The CIDR block for the second public subnet
+    Type: String
+    Default: 10.0.4.0/24
+
+  PrivateSubnet1CIDR:
+    Description: The CIDR block for the first private subnet
+    Type: String
+    Default: 10.0.1.0/24
+
+  PrivateSubnet2CIDR:
+    Description: The CIDR block for the second private subnet
+    Type: String
+    Default: 10.0.2.0/24
+
+Resources:
+  vpc:
+    Type: AWS::EC2::VPC
+    Properties: 
+      CidrBlock: !Ref VpcCIDR
+  
+  securityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: 'Servers SG'
+      VpcId: !Ref vpc
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+
+  privateSubNet1:
+    Type: 'AWS::EC2::Subnet'
+    Properties: 
+      AvailabilityZone: us-east-1a
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      VpcId:
+        Ref: vpc
+
+  privateSubNet2:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: us-east-1b
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      VpcId:
+        Ref: vpc
+
+
+  publicSubNet1:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: us-east-1a
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      VpcId:
+        Ref: vpc
+
+  publicSubNet2:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: us-east-1b
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      VpcId:
+        Ref: vpc
+
+  launchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties: 
+      LaunchTemplateData: 
+        BlockDeviceMappings:
+          - DeviceName: '/dev/sdk'
+            Ebs: 
+              VolumeSize: 10
+        ImageId: 'ami-0d73480446600f555'
+        InstanceType: 't2.medium'
+        SecurityGroupIds:
+          - !GetAtt securityGroup.GroupId
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+            sudo apt-get update -y
+            sudo apt-get install apache2 -y
+            sudo systemctl start apache2.service
+            cd /var/www/html
+            sudo chmod 777 index.html
+            echo "Udacity Demo Web Server Up and Running!" > index.html
+      LaunchTemplateName: 'project2Template'
+  
+  autoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties: 
+      AutoScalingGroupName: 'ServersASG'
+      MaxSize: '4'
+      MinSize: '1'
+      VPCZoneIdentifier:
+        - !GetAtt privateSubNet1.SubnetId
+        - !GetAtt privateSubNet2.SubnetId
+      MixedInstancesPolicy:
+        LaunchTemplate:
+          LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref launchTemplate
+            Version: !GetAtt launchTemplate.LatestVersionNumber
+      TargetGroupARNs: 
+        - !Ref targetGroup
+
+  internetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  InternetGatewayAttachment:
+        Type: AWS::EC2::VPCGatewayAttachment
+        Properties:
+            InternetGatewayId: !Ref internetGateway
+            VpcId: !Ref vpc
+
+  Nat1PublicIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties: 
+      AllocationId: !GetAtt Nat1PublicIP.AllocationId
+      SubnetId: !Ref publicSubNet1
+
+  Nat2PublicIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties: 
+      AllocationId: !GetAtt Nat2PublicIP.AllocationId
+      SubnetId: !Ref publicSubNet2
+
+  privateRoutingTable1:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref vpc
+
+  privateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !GetAtt privateRoutingTable1.RouteTableId
+      NatGatewayId: !Ref NatGateway1
+      DestinationCidrBlock: 0.0.0.0/0
+
+  SubnetRouteTableAssociationP1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !GetAtt privateRoutingTable1.RouteTableId
+      SubnetId: !Ref privateSubNet1
+
+  privateRoutingTable2:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref vpc
+
+  privateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !GetAtt privateRoutingTable2.RouteTableId
+      NatGatewayId: !Ref NatGateway2
+      DestinationCidrBlock: 0.0.0.0/0
+
+  SubnetRouteTableAssociationP2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !GetAtt privateRoutingTable2.RouteTableId
+      SubnetId: !Ref privateSubNet2
+
+  publicRoutingTable:
+      Type: AWS::EC2::RouteTable
+      Properties: 
+        VpcId: !Ref vpc
+
+  publicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !GetAtt publicRoutingTable.RouteTableId
+      GatewayId: !Ref internetGateway
+      DestinationCidrBlock: 0.0.0.0/0
+
+  SubnetRouteTableAssociationPu1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !GetAtt publicRoutingTable.RouteTableId
+      SubnetId: !Ref publicSubNet1
+
+  SubnetRouteTableAssociationPu2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !GetAtt publicRoutingTable.RouteTableId
+      SubnetId: !Ref publicSubNet2
+
+  LBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: 'LoadBalancer SG'
+      VpcId: !Ref vpc
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+
+  loadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:  
+      Scheme: 'internet-facing'
+      SecurityGroups:
+        - !Ref LBSecurityGroup
+      Subnets:
+        - !Ref publicSubNet1
+        - !Ref publicSubNet2
+      IpAddressType: 'ipv4'      
+
+  LBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref targetGroup
+      LoadBalancerArn: !Ref loadBalancer
+      Port: 80
+      Protocol: 'HTTP'
+
+  LBLRule: 
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions: 
+        - Type: 'forward' 
+          TargetGroupArn: !Ref targetGroup
+      Conditions: 
+        - Field: path-pattern
+          Values: [/] 
+      ListenerArn: !GetAtt LBListener.ListenerArn
+      Priority: 1
+
+  targetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: !Ref vpc
+
+Outputs: 
+  # This is also optional.
+  # Bonus points for useful outputs!
+  # for example, if you create a Load Balancer
+  # it's nice to output the URL to it here, so that we don't have to go to the console to get it.
+  LoadBalancerURL:
+    Description: The URL for loadbalancer
+    Value: !GetAtt loadBalancer.DNSName
+
+  LoadBalancer:
+    Description: The created loadbalancer
+    Value: !Ref loadBalancer
+
+# Sample UserData
+# When creating your Launch Configuration, you may need a UserData script
+# here's one that you can use for Ubuntu Linux that will:
+# Install Apache Web Server, Start it, and create an index.html that will be displayed
+# when you visit the IP address of this server with your web browser
+#Here it is:
+#
+#          #!/bin/bash
+#          apt-get update -y
+#          apt-get install apache2 -y
+#          systemctl start apache2.service
+#          cd /var/www/html
+#          echo "Udacity Demo Web Server Up and Running!" > index.html
+
+#aws cloudformation create-stack --stack-name p2 --template-body file://project2.yml 
